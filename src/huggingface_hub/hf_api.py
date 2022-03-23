@@ -994,30 +994,6 @@ class HfApi:
         d = r.json()
         return ModelInfo(**d)
 
-    def list_repo_files(
-        self,
-        repo_id: str,
-        revision: Optional[str] = None,
-        repo_type: Optional[str] = None,
-        token: Optional[str] = None,
-        timeout: Optional[float] = None,
-    ) -> List[str]:
-        """
-        Get the list of files in a given repo.
-        """
-        if repo_type is None or repo_type == "model":
-            info = self.model_info(
-                repo_id, revision=revision, token=token, timeout=timeout
-            )
-        elif repo_type == "dataset":
-            info = self.dataset_info(
-                repo_id, revision=revision, token=token, timeout=timeout
-            )
-        else:
-            raise ValueError("Spaces are not available yet.")
-
-        return [f.rfilename for f in info.siblings]
-
     def dataset_info(
         self,
         repo_id: str,
@@ -1044,6 +1020,30 @@ class HfApi:
         r.raise_for_status()
         d = r.json()
         return DatasetInfo(**d)
+
+    def list_repo_files(
+        self,
+        repo_id: str,
+        revision: Optional[str] = None,
+        repo_type: Optional[str] = None,
+        token: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> List[str]:
+        """
+        Get the list of files in a given repo.
+        """
+        if repo_type is None or repo_type == "model":
+            info = self.model_info(
+                repo_id, revision=revision, token=token, timeout=timeout
+            )
+        elif repo_type == "dataset":
+            info = self.dataset_info(
+                repo_id, revision=revision, token=token, timeout=timeout
+            )
+        else:
+            raise ValueError("Spaces are not available yet.")
+
+        return [f.rfilename for f in info.siblings]
 
     def create_repo(
         self,
