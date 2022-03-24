@@ -1059,6 +1059,7 @@ class HfApi:
     def repo_info(
         self,
         repo_id: str,
+        *,
         revision: Optional[str] = None,
         repo_type: Optional[str] = None,
         token: Optional[str] = None,
