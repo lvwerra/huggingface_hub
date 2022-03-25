@@ -4,7 +4,7 @@ from glob import glob
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
-from .constants import DEFAULT_REVISION, HUGGINGFACE_HUB_CACHE
+from .constants import DEFAULT_REVISION, HUGGINGFACE_HUB_CACHE, REPO_TYPES
 from .file_download import cached_download, hf_hub_url
 from .hf_api import HfApi, HfFolder
 from .utils import logging
@@ -53,6 +53,9 @@ def snapshot_download(
         revision (``str``, `optional`):
             An optional Git revision id which can be a branch name, a tag, or a
             commit hash.
+        repo_type: Set to :obj:`"dataset"` or :obj:`"space"` if downloading
+            a dataset or space, :obj:`None` or :obj:`"model"` if
+            downloading a model. Default is :obj:`None`.
         cache_dir (``str``, ``Path``, `optional`):
             Path to the folder where cached files are stored.
         library_name (``str``, `optional`):
@@ -113,6 +116,11 @@ def snapshot_download(
     else:
         token = None
 
+    if repo_type is None:
+        repo_type = "model"
+    if repo_type not in REPO_TYPES:
+        raise ValueError("Invalid repo type")
+
     # remove all `/` occurrences to correctly convert repo to directory name
     repo_id_flattened = repo_id.replace("/", REPO_ID_SEPARATOR)
 
@@ -147,7 +155,7 @@ def snapshot_download(
         if len(repo_folders) == 0:
             raise ValueError(
                 "Cannot find the requested files in the cached path and outgoing traffic has been"
-                " disabled. To enable model look-ups and downloads online, set 'local_files_only'"
+                " disabled. To enable repo look-ups and downloads online, set 'local_files_only'"
                 " to False."
             )
 
