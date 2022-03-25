@@ -23,7 +23,10 @@ from . import __version__
 from .constants import (
     DEFAULT_REVISION,
     HUGGINGFACE_CO_URL_TEMPLATE,
+    HUGGINGFACE_HEADER_X_LINKED_ETAG,
+    HUGGINGFACE_HEADER_X_REPO_COMMIT,
     HUGGINGFACE_HUB_CACHE,
+    REPO_ID_SEPARATOR,
     REPO_TYPES,
     REPO_TYPES_URL_PREFIXES,
 )
@@ -610,6 +613,10 @@ def cached_download(
     return cache_path
 
 
+def normalize_etag(etag: str) -> str:
+    return etag.strip('"')
+
+
 def hf_hub_download(
     repo_id: str,
     filename: str,
@@ -621,7 +628,6 @@ def hf_hub_download(
     cache_dir: Union[str, Path, None] = None,
     user_agent: Union[Dict, str, None] = None,
     force_download: Optional[bool] = False,
-    force_filename: Optional[str] = None,
     proxies: Optional[Dict] = None,
     etag_timeout: Optional[float] = 10,
     resume_download: Optional[bool] = False,
@@ -656,8 +662,6 @@ def hf_hub_download(
         force_download (``bool``, `optional`, defaults to ``False``):
             Whether the file should be downloaded even if it already exists in
             the local cache.
-        force_filename (``str``, `optional`):
-            Use this name instead of a generated file name.
         proxies (``dict``, `optional`):
             Dictionary mapping protocol to the URL of the proxy passed to
             ``requests.request``.
@@ -688,16 +692,29 @@ def hf_hub_download(
         - ``ValueError`` if the file cannot be downloaded and cannot be found
             locally.
     """
-    url = hf_hub_url(
-        repo_id, filename, subfolder=subfolder, repo_type=repo_type, revision=revision
-    )
-
     if cache_dir is None:
         cache_dir = HUGGINGFACE_HUB_CACHE
+    if revision is None:
+        revision = DEFAULT_REVISION
     if isinstance(cache_dir, Path):
         cache_dir = str(cache_dir)
 
-    os.makedirs(cache_dir, exist_ok=True)
+    if repo_type is None:
+        repo_type = "model"
+    if repo_type not in REPO_TYPES:
+        raise ValueError("Invalid repo type")
+
+    # remove all `/` occurrences to correctly convert repo to directory name
+    repo_id_flattened = f"{repo_type}s{REPO_ID_SEPARATOR}" + repo_id.replace(
+        "/", REPO_ID_SEPARATOR
+    )
+    storage_folder = os.path.join(cache_dir, repo_id_flattened)
+
+    os.makedirs(storage_folder, exist_ok=True)
+
+    url = hf_hub_url(
+        repo_id, filename, subfolder=subfolder, repo_type=repo_type, revision=revision
+    )
 
     headers = {
         "user-agent": http_user_agent(
@@ -718,6 +735,7 @@ def hf_hub_download(
 
     url_to_download = url
     etag = None
+    commit_hash = None
     if not local_files_only:
         try:
             r = _request_with_retry(
@@ -729,7 +747,14 @@ def hf_hub_download(
                 timeout=etag_timeout,
             )
             r.raise_for_status()
-            etag = r.headers.get("X-Linked-Etag") or r.headers.get("ETag")
+            commit_hash = r.headers[HUGGINGFACE_HEADER_X_REPO_COMMIT]
+            if commit_hash is None:
+                raise OSError(
+                    "Distant resource does not seem to be the huggingface hub (missing commit header)."
+                )
+            etag = r.headers.get(HUGGINGFACE_HEADER_X_LINKED_ETAG) or r.headers.get(
+                "ETag"
+            )
             # We favor a custom header indicating the etag of the linked resource, and
             # we fallback to the regular etag header.
             # If we don't have any of those, raise an error.
@@ -737,6 +762,7 @@ def hf_hub_download(
                 raise OSError(
                     "Distant resource does not have an ETag, we won't be able to reliably ensure reproducibility."
                 )
+            etag = normalize_etag(etag)
             # In case of a redirect,
             # save an extra redirect on the request.get call,
             # and ensure we download the exact atomic version even if it changed
@@ -754,11 +780,6 @@ def hf_hub_download(
             # Otherwise, our Internet connection is down.
             # etag is None
             pass
-
-    filename = url_to_filename(url, etag)
-
-    # get cache path to put the file
-    cache_path = os.path.join(cache_dir, filename)
 
     # etag is None == we don't have a connection or we passed local_files_only.
     # try to get the last downloaded one
@@ -791,30 +812,51 @@ def hf_hub_download(
                         " Please try again or make sure your Internet connection is on."
                     )
 
-    # From now on, etag is not None.
-    if os.path.exists(cache_path) and not force_download:
-        return cache_path
+    # From now on, etag and commit_hash are not None.
+    blob_path = os.path.join(storage_folder, "blobs", etag)
+    pointer_path = os.path.join(storage_folder, "snapshots", commit_hash, filename)
+
+    os.makedirs(os.path.dirname(blob_path), exist_ok=True)
+    os.makedirs(os.path.dirname(pointer_path), exist_ok=True)
+    # if passed revision is not identical to commit_hash
+    # then revision has to be a branch name or tag name.
+    # In that case store a ref.
+    if revision != commit_hash:
+        ref_path = os.path.join(storage_folder, "refs", revision)
+        os.makedirs(os.path.dirname(ref_path), exist_ok=True)
+        with open(ref_path, "w") as f:
+            f.write(commit_hash)
+
+    if os.path.exists(pointer_path) and not force_download:
+        return pointer_path
+
+    if os.path.exists(blob_path) and not force_download:
+        # we have the blob already, but not the pointer
+        logger.info("creating pointer to %s from %s", blob_path, pointer_path)
+        os.symlink(blob_path, pointer_path)
+        # TODO(should we try to do relative instead of absolute?)
+        return pointer_path
 
     # Prevent parallel downloads of the same file with a lock.
-    lock_path = cache_path + ".lock"
+    lock_path = blob_path + ".lock"
 
     # Some Windows versions do not allow for paths longer than 255 characters.
     # In this case, we must specify it is an extended path by using the "\\?\" prefix.
     if os.name == "nt" and len(os.path.abspath(lock_path)) > 255:
         lock_path = "\\\\?\\" + os.path.abspath(lock_path)
 
-    if os.name == "nt" and len(os.path.abspath(cache_path)) > 255:
-        cache_path = "\\\\?\\" + os.path.abspath(cache_path)
+    if os.name == "nt" and len(os.path.abspath(blob_path)) > 255:
+        blob_path = "\\\\?\\" + os.path.abspath(blob_path)
 
     with FileLock(lock_path):
 
         # If the download just completed while the lock was activated.
-        if os.path.exists(cache_path) and not force_download:
+        if os.path.exists(pointer_path) and not force_download:
             # Even if returning early like here, the lock will be released.
-            return cache_path
+            return pointer_path
 
         if resume_download:
-            incomplete_path = cache_path + ".incomplete"
+            incomplete_path = blob_path + ".incomplete"
 
             @contextmanager
             def _resumable_file_manager() -> "io.BufferedWriter":
@@ -845,13 +887,16 @@ def hf_hub_download(
                 headers=headers,
             )
 
-        logger.info("storing %s in cache at %s", url, cache_path)
-        os.replace(temp_file.name, cache_path)
+        logger.info("storing %s in cache at %s", url, blob_path)
+        os.replace(temp_file.name, blob_path)
 
-        logger.info("creating metadata file for %s", cache_path)
-        meta = {"url": url, "etag": etag}
-        meta_path = cache_path + ".json"
-        with open(meta_path, "w") as meta_file:
-            json.dump(meta, meta_file)
+        logger.info("creating pointer to %s from %s", blob_path, pointer_path)
+        os.symlink(blob_path, pointer_path)
+        # TODO(should we try to do relative instead of absolute?)
 
-    return cache_path
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+
+    return pointer_path
