@@ -92,9 +92,6 @@ def snapshot_download(
         - ``ValueError`` if the file cannot be downloaded and cannot be found
             locally.
     """
-    # Note: at some point maybe this format of storage should actually replace
-    # the flat storage structure we've used so far (initially from allennlp
-    # if I remember correctly).
 
     if cache_dir is None:
         cache_dir = HUGGINGFACE_HUB_CACHE
